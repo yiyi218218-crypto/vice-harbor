@@ -1,241 +1,373 @@
-// Entry point. Reads the URL parameters, builds one Game, runs the frame loop and
-// exposes a small surface for the screenshot rig and the smoke test.
+// Vice Harbor - game orchestration.
+// Wires input, world, render and HUD into a playable loop: walk, steal and
+// drive cars, shoot, build a wanted level, survive police, run three jobs and
+// save progress to localStorage. Also honours the deterministic ?shot= modes.
 
-import { GAME } from './config.js';
-import { Input } from './input.js';
-import { Game } from './game.js';
-import { applyShot, shotPoseApply, SHOT_NAMES } from './shots.js';
+import * as THREE from 'three';
+import { CFG, PAL, MISSIONS, SAVE_KEY } from './config.js';
+import { makeRng } from './random.js';
+import { createInput } from './input.js';
+import { buildCity, spawnTraffic, spawnPedestrians, updateTraffic, updatePedestrians, makeCar } from './world.js';
+import { createRenderer, followCamera } from './render.js';
+import { readShot, shotSetup } from './shots.js';
 
-const THREE = globalThis.THREE;
-const params = new URLSearchParams(location.search);
-const seedParam = params.get('seed');
-const seed = seedParam ? Number(seedParam) || 1 : 1;
-const shot = params.get('shot');
-const testMode = params.get('test') === '1';
-
-const errors = [];
-window.addEventListener('error', (e) => {
-  errors.push(String(e.message || e.error || 'error'));
-});
-window.addEventListener('unhandledrejection', (e) => {
-  errors.push(String(e.reason || 'rejection'));
-});
+const { mode, seed } = readShot();
+const shot = shotSetup(mode);
+const rng = makeRng(seed + '-viceharbor');
 
 const canvas = document.getElementById('view');
-const input = new Input(canvas);
-const game = new Game({ canvas, seed, input, capture: params.get('capture') === '1' });
-window.__vice = { game, ready: false, errors };
+const { renderer, scene, camera } = createRenderer(canvas);
+const input = createInput(canvas);
+buildCity(scene, rng);
+const traffic = spawnTraffic(scene, rng);
+const peds = spawnPedestrians(scene, rng);
 
-input.onPauseRequest = () => {
-  if (game.state === 'playing') game.pause();
-  else if (game.state === 'paused') game.resume();
-};
-input.onLockChange = (locked) => {
-  if (!locked && game.state === 'playing' && !game.shotMode) game.pause();
-};
-
-window.addEventListener('resize', () => game.onResize());
-
-if (shot && SHOT_NAMES.includes(shot)) {
-  applyShot(game, shot);
+// ---- persistent save -----------------------------------------------------
+function loadSave() {
+  try { return JSON.parse(localStorage.getItem(SAVE_KEY)) || {}; } catch { return {}; }
 }
+let save = loadSave();
+const state = {
+  phase: shot ? (shot.overlay === 'end' ? 'end' : 'play') : 'start',
+  health: shot?.health ?? CFG.player.maxHealth,
+  wanted: shot?.wanted ?? 0,
+  money: save.money || 0,
+  mission: save.mission || 0,
+  completed: shot?.completed ?? (save.completed || 0),
+  cleanTime: 0,
+  fireTimer: 0,
+  message: '',
+  messageTimer: 0,
+  time: 0,
+  gameOver: false,
+};
 
-// camera override for QA: ?cam=x,y,z,tx,ty,tz&fov=55
-const camParam = params.get('cam');
-if (camParam) {
-  const v = camParam.split(',').map(Number);
-  if (v.length === 6 && v.every((n) => Number.isFinite(n))) {
-    game.shotMode = true;
-    game.shotPose = {
-      pos: new THREE.Vector3(v[0], v[1], v[2]),
-      look: new THREE.Vector3(v[3], v[4], v[5]),
-      fov: Number(params.get('fov')) || 55,
-    };
-    document.getElementById('menu')?.classList.add('hidden');
-    game.hud.show(false);
+// ---- avatar --------------------------------------------------------------
+const avatar = new THREE.Group();
+const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.55, 1.5, 4, 10), new THREE.MeshLambertMaterial({ color: 0x1f6f8b }));
+torso.position.y = 1.8;
+avatar.add(torso);
+const head = new THREE.Mesh(new THREE.SphereGeometry(0.5, 10, 10), new THREE.MeshLambertMaterial({ color: 0xd9a066 }));
+head.position.y = 3.1;
+avatar.add(head);
+scene.add(avatar);
+
+const player = {
+  pos: new THREE.Vector3(shot?.pos?.x ?? 0, 0, shot?.pos?.z ?? 26),
+  heading: shot?.heading ?? Math.PI,
+  inCar: false,
+  car: null,
+};
+avatar.position.copy(player.pos);
+
+// The one car the player can enter/exit; spawned near the avatar.
+const playerCar = makeCar(scene, 0xe74c3c);
+playerCar.group.position.set(player.pos.x + 6, 0, player.pos.z + 4);
+playerCar.group.rotation.y = player.heading;
+let carSpeed = 0;
+
+// ---- police, bullets, mission marker ------------------------------------
+const police = [];
+const bullets = [];
+const marker = new THREE.Mesh(
+  new THREE.CylinderGeometry(6, 6, 1.2, 24),
+  new THREE.MeshBasicMaterial({ color: PAL.neonGold, transparent: true, opacity: 0.55 }),
+);
+scene.add(marker);
+
+function spawnPolice() {
+  while (police.length < state.wanted * CFG.wanted.policePerStar) {
+    const p = makeCar(scene, 0xffffff, true);
+    const a = rng() * Math.PI * 2;
+    p.group.position.set(player.pos.x + Math.sin(a) * 60, 0, player.pos.z + Math.cos(a) * 60);
+    police.push({ ...p, speed: 0 });
+  }
+  while (police.length > state.wanted * CFG.wanted.policePerStar) {
+    const p = police.pop();
+    scene.remove(p.group);
   }
 }
 
-let last = performance.now();
-let frames = 0;
+function fire() {
+  if (state.fireTimer > 0) return;
+  state.fireTimer = CFG.player.fireCooldown;
+  const dir = new THREE.Vector3(Math.sin(player.heading), 0, Math.cos(player.heading));
+  const b = new THREE.Mesh(new THREE.SphereGeometry(0.3, 6, 6), new THREE.MeshBasicMaterial({ color: PAL.neonGold }));
+  const origin = player.pos.clone().add(dir.clone().multiplyScalar(player.inCar ? 3 : 1.5));
+  origin.y = player.inCar ? 1.6 : 2.2;
+  b.position.copy(origin);
+  scene.add(b);
+  bullets.push({ mesh: b, vel: dir.clone().multiplyScalar(CFG.player.bulletSpeed), life: CFG.player.bulletLife });
+  if (state.wanted < CFG.wanted.stars) {
+    state.wanted += CFG.wanted.shootStars;
+    toast('WANTED LEVEL ' + state.wanted);
+  }
+}
 
-function frame(now) {
-  const dt = Math.min((now - last) / 1000 || 0.016, GAME.maxFrame);
-  last = now;
-  frames++;
+function toast(msg) {
+  state.message = msg;
+  state.messageTimer = 2.4;
+}
 
-  if (game.shotMode) {
-    game.stage.update(dt, game.player.pos);
-    shotPoseApply(game);
-    game.updateHud();
-    game.effects.update(dt);
+// ---- mission logic -------------------------------------------------------
+function currentMission() { return MISSIONS[state.mission] || null; }
+
+function updateMarker() {
+  const m = currentMission();
+  if (!m) { marker.visible = false; return; }
+  marker.visible = true;
+  marker.position.set(m.target.x, 0.7 + Math.sin(state.time * 2) * 0.3, m.target.z);
+}
+
+function checkMission() {
+  const m = currentMission();
+  if (!m) return;
+  if (m.needCar && !player.inCar) return;
+  if (m.needStars && state.wanted < m.needStars) return;
+  const d = Math.hypot(player.pos.x - m.target.x, player.pos.z - m.target.z);
+  if (d < m.radius) {
+    state.money += m.reward;
+    state.completed += 1;
+    state.mission += 1;
+    save.money = state.money;
+    save.mission = state.mission;
+    save.completed = state.completed;
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch {}
+    toast(m.title + ' COMPLETE  +$' + m.reward);
+    if (state.mission >= MISSIONS.length) {
+      state.phase = 'end';
+      showOverlay('end');
+    }
+  }
+}
+
+// ---- damage & police AI --------------------------------------------------
+function takeDamage(amount) {
+  state.health = Math.max(0, state.health - amount);
+  if (state.health <= 0 && !state.gameOver) {
+    state.gameOver = true;
+    state.phase = 'end';
+    showOverlay('end');
+  }
+}
+
+function updatePolice(dt) {
+  for (const p of police) {
+    const dx = player.pos.x - p.group.position.x;
+    const dz = player.pos.z - p.group.position.z;
+    const dist = Math.hypot(dx, dz) || 1;
+    const targetHeading = Math.atan2(dx, dz);
+    p.group.rotation.y = targetHeading;
+    p.speed = Math.min(CFG.car.topSpeed * 0.92, p.speed + CFG.car.accel * dt);
+    p.group.position.x += Math.sin(targetHeading) * p.speed * dt;
+    p.group.position.z += Math.cos(targetHeading) * p.speed * dt;
+    if (p.bar) p.bar.material.color.setHex(Math.floor(state.time * 6) % 2 ? PAL.neonPink : 0x3355ff);
+    if (dist < 4.5 && state.time % 1.2 < dt) takeDamage(6);
+  }
+}
+
+function updateBullets(dt) {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.mesh.position.addScaledVector(b.vel, dt);
+    b.life -= dt;
+    let hit = false;
+    for (let j = police.length - 1; j >= 0; j--) {
+      if (b.mesh.position.distanceTo(police[j].group.position) < 3) {
+        scene.remove(police[j].group);
+        police.splice(j, 1);
+        hit = true;
+        break;
+      }
+    }
+    if (b.life <= 0 || hit) {
+      scene.remove(b.mesh);
+      bullets.splice(i, 1);
+    }
+  }
+}
+
+// ---- overlays & HUD ------------------------------------------------------
+const elStart = document.getElementById('start');
+const elEnd = document.getElementById('end');
+const elHud = document.getElementById('hud');
+const elHealth = document.getElementById('health-fill');
+const elStars = document.getElementById('stars');
+const elMission = document.getElementById('mission');
+const elMsg = document.getElementById('toast');
+const elStats = document.getElementById('stats');
+const mini = document.getElementById('minimap');
+const mctx = mini.getContext('2d');
+
+function showOverlay(which) {
+  elStart.classList.toggle('hidden', which !== 'start');
+  elEnd.classList.toggle('hidden', which !== 'end');
+  elHud.classList.toggle('hidden', which === 'start');
+  if (which === 'end') {
+    document.getElementById('end-stats').textContent =
+      `Jobs cleared: ${state.completed}/${MISSIONS.length}   Cash: $${state.money}`;
+  }
+}
+
+function drawMinimap() {
+  const w = mini.width, h = mini.height;
+  mctx.clearRect(0, 0, w, h);
+  mctx.fillStyle = 'rgba(12,10,24,0.72)';
+  mctx.fillRect(0, 0, w, h);
+  const scale = w / (CFG.city.half * 2);
+  const px = (x) => (x + CFG.city.half) * scale;
+  const pz = (z) => (z + CFG.city.half) * scale;
+  mctx.strokeStyle = 'rgba(180,180,210,0.18)';
+  mctx.lineWidth = 1;
+  for (let x = -CFG.city.half; x <= CFG.city.half; x += CFG.city.block) {
+    mctx.beginPath(); mctx.moveTo(px(x), 0); mctx.lineTo(px(x), h); mctx.stroke();
+    mctx.beginPath(); mctx.moveTo(0, pz(x)); mctx.lineTo(w, pz(x)); mctx.stroke();
+  }
+  // harbour water
+  mctx.fillStyle = 'rgba(40,90,140,0.5)';
+  mctx.fillRect(0, pz(CFG.city.seaZ), w, h - pz(CFG.city.seaZ));
+  // mission marker
+  const m = currentMission();
+  if (m) {
+    mctx.fillStyle = '#ffd23f';
+    mctx.beginPath(); mctx.arc(px(m.target.x), pz(m.target.z), 4, 0, Math.PI * 2); mctx.fill();
+  }
+  // police
+  mctx.fillStyle = '#ff2d95';
+  for (const p of police) mctx.fillRect(px(p.group.position.x) - 2, pz(p.group.position.z) - 2, 4, 4);
+  // player
+  mctx.fillStyle = '#2ee6f2';
+  mctx.save();
+  mctx.translate(px(player.pos.x), pz(player.pos.z));
+  mctx.rotate(-player.heading);
+  mctx.beginPath(); mctx.moveTo(0, -6); mctx.lineTo(4, 5); mctx.lineTo(-4, 5); mctx.closePath(); mctx.fill();
+  mctx.restore();
+  mctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  mctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+}
+
+function updateHud() {
+  elHealth.style.width = state.health + '%';
+  elHealth.style.background = state.health > 40 ? '#2ecc71' : '#e74c3c';
+  elStars.textContent = '★'.repeat(state.wanted) + '☆'.repeat(CFG.wanted.stars - state.wanted);
+  const m = currentMission();
+  elMission.textContent = m ? `${m.title} — ${m.brief}` : 'ALL JOBS CLEAR — free roam';
+  elMsg.textContent = state.messageTimer > 0 ? state.message : '';
+  elStats.textContent = `$${state.money}  |  ${state.completed}/${MISSIONS.length} jobs`;
+  drawMinimap();
+}
+
+// ---- controls ------------------------------------------------------------
+function handleControls(dt) {
+  if (state.phase !== 'play') {
+    if (input.justPressed('Enter') || input.justPressed('Space')) {
+      if (state.phase === 'end') {
+        state.phase = 'play';
+        state.health = CFG.player.maxHealth;
+        state.gameOver = false;
+      } else {
+        state.phase = 'play';
+        input.lock();
+      }
+      showOverlay(null);
+    }
+    return;
+  }
+
+  // enter / exit vehicle
+  if (input.justPressed('KeyE')) {
+    if (!player.inCar && player.pos.distanceTo(playerCar.group.position) < 6) {
+      player.inCar = true;
+      player.car = playerCar;
+      toast('CARJACKED — +2 WANTED');
+      state.wanted = Math.max(state.wanted, CFG.wanted.carjackStars);
+    } else if (player.inCar) {
+      player.inCar = false;
+      player.pos.set(playerCar.group.position.x + 3, 0, playerCar.group.position.z);
+      avatar.position.copy(player.pos);
+      avatar.visible = true;
+      player.car = null;
+    }
+  }
+
+  const turn = (input.isDown('KeyA') ? 1 : 0) - (input.isDown('KeyD') ? 1 : 0);
+  const fwd = (input.isDown('KeyW') ? 1 : 0) - (input.isDown('KeyS') ? 1 : 0);
+
+  if (player.inCar) {
+    carSpeed += turn * CFG.car.turnRate * dt * 12;
+    carSpeed = THREE.MathUtils.clamp(carSpeed, -CFG.car.reverse, CFG.car.topSpeed);
+    if (fwd > 0) carSpeed += CFG.car.accel * dt;
+    else if (fwd < 0) carSpeed -= CFG.car.brake * dt;
+    // natural drag: lift off the pedals and the car coasts to a stop
+    carSpeed -= carSpeed * CFG.car.drag * dt * 0.15;
+    player.heading += turn * CFG.car.turnRate * dt * (carSpeed > 0 ? 1 : -1);
+    playerCar.group.rotation.y = player.heading;
+    playerCar.group.position.x += Math.sin(player.heading) * carSpeed * dt;
+    playerCar.group.position.z += Math.cos(player.heading) * carSpeed * dt;
+    player.pos.copy(playerCar.group.position);
+    avatar.visible = false;
   } else {
-    game.update(dt);
+    const running = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
+    const speed = running ? CFG.player.run : CFG.player.walk;
+    player.heading += turn * 3.2 * dt;
+    player.pos.x += Math.sin(player.heading) * fwd * speed * dt;
+    player.pos.z += Math.cos(player.heading) * fwd * speed * dt;
+    avatar.position.copy(player.pos);
+    avatar.rotation.y = player.heading;
   }
-  game.render();
-  input.endFrame();
 
-  if (!window.__vice.ready) {
-    window.__vice.ready = true;
-    document.body.dataset.ready = '1';
+  // wanted cool-down when not committing crimes
+  if (state.wanted > 0) {
+    state.cleanTime += dt;
+    if (state.cleanTime > CFG.wanted.coolDown) {
+      state.cleanTime = 0;
+      state.wanted -= 1;
+      toast('WANTED LEVEL ' + state.wanted);
+    }
+  } else state.cleanTime = 0;
+
+  if (input.mouse.left) fire();
+  updateMarker();
+  checkMission();
+}
+
+// ---- apply deterministic shot preset ------------------------------------
+if (shot) {
+  if (shot.police) {
+    state.wanted = Math.max(state.wanted, shot.police);
   }
+  spawnPolice();
+  if (shot.inCar) {
+    player.inCar = true;
+    playerCar.group.position.set(player.pos.x, 0, player.pos.z);
+    playerCar.group.rotation.y = player.heading;
+    player.pos.copy(playerCar.group.position);
+    avatar.visible = false;
+  }
+  updateMarker();
+  showOverlay(shot.overlay);
+} else {
+  showOverlay('start');
+}
+
+// ---- main loop -----------------------------------------------------------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  state.time += dt;
+  state.fireTimer = Math.max(0, state.fireTimer - dt);
+  state.messageTimer = Math.max(0, state.messageTimer - dt);
+
+  handleControls(dt);
+  updateTraffic(traffic, dt);
+  updatePedestrians(peds, dt, state.time);
+  updatePolice(dt);
+  updateBullets(dt);
+  followCamera(camera, player.pos, player.heading, dt, !!shot && shot.overlay !== null);
+  updateHud();
+  input.consume();
+  renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
-
-// --- smoke test ----------------------------------------------------------------
-
-function missionFlow(game) {
-  const checks = [];
-  const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail: detail === undefined ? '' : String(detail) });
-
-  // --- job one: steal the Marlin and put it in the garage
-  game.startNew();
-  game.player.pos.x = game.world.spots.dockCar.x + 1.2;
-  game.player.pos.z = game.world.spots.dockCar.z;
-  game.tryEnterVehicle();
-  add('job1.steal', game.player.vehicle === game.missionCar, game.player.vehicle ? game.player.vehicle.name : 'none');
-  if (game.player.vehicle) {
-    game.player.vehicle.x = game.world.spots.garage.x;
-    game.player.vehicle.z = game.world.spots.garage.z;
-  }
-  game.mission.update(1 / 60);
-  game.mission.update(1 / 60);
-  add('job1.paid', game.money >= 250 + 1800 && !game.mission.active, game.money);
-
-  // --- job two: clear the crew, then shake the heat
-  if (game.player.vehicle) game.tryExitVehicle();
-  game.mission.start(1);
-  game.player.pos.x = game.world.spots.saltRow.x;
-  game.player.pos.z = game.world.spots.saltRow.z;
-  game.mission.update(1 / 60);
-  add('job2.crew', game.mission.thugs.length === 4, game.mission.thugs.length);
-  for (const t of game.mission.thugs.slice()) {
-    t.hit(120);
-    game.onPedDown(t);
-  }
-  game.heat = 0;
-  game.mission.update(1 / 60);
-  game.mission.update(1 / 60);
-  game.mission.update(1 / 60);
-  add('job2.paid', game.money >= 250 + 1800 + 3400, game.money);
-
-  // --- job three: three crates, the berth, then out
-  game.mission.start(2);
-  for (const c of game.world.spots.crates) {
-    game.player.pos.x = c.x;
-    game.player.pos.z = c.z;
-    for (let i = 0; i < 4; i++) game.update(1 / 60);
-  }
-  add('job3.crates', game.mission.crates >= 3, `${game.mission.crates}/${game.mission._cratePickups.length}@${game.player.pos.x.toFixed(0)},${game.player.pos.z.toFixed(0)} active=${game.mission.active}`);
-  game.player.pos.x = game.world.spots.berth9.x;
-  game.player.pos.z = game.world.spots.berth9.z;
-  for (let i = 0; i < 4; i++) game.update(1 / 60);
-  game.heat = 0;
-  game.player.pos.x = 0;
-  game.player.pos.z = 0;
-  for (let i = 0; i < 6; i++) game.update(1 / 60);
-  add('job3.paid', game.money >= 250 + 1800 + 3400 + 6500, game.money);
-  add('story.done', game.stats.missions === 3, game.stats.missions);
-
-  return checks;
-}
-
-function runSelfTest() {
-  const checks = [];
-  const add = (name, ok, detail) => checks.push({ name, ok: !!ok, detail: detail === undefined ? '' : String(detail) });
-
-  try {
-    add('world.colliders', game.world.colliders.length > 30, game.world.colliders.length);
-    add('world.buildings', game.world.buildings.length > 40, game.world.buildings.length);
-    add('world.graph', game.world.graph.nodes.length === 36, game.world.graph.nodes.length);
-    add('traffic.cars', game.traffic.cars.length >= 10, game.traffic.cars.length);
-    add('traffic.parked', game.traffic.parked.length >= 5, game.traffic.parked.length);
-    add('crowd.peds', game.crowd.peds.length >= 20, game.crowd.peds.length);
-    add('hud.nodes', game.hud.starEls.length === 5 && !!game.hud.map, game.hud.starEls.length);
-
-    game.startNew();
-    add('state.playing', game.state === 'playing', game.state);
-    add('mission.started', game.mission.active && game.mission.index === 0, game.mission.index);
-
-    // walking
-    const start = { x: game.player.pos.x, z: game.player.pos.z };
-    input.held.add('KeyW');
-    for (let i = 0; i < 45; i++) game.update(1 / 60);
-    input.held.delete('KeyW');
-    const moved = Math.hypot(game.player.pos.x - start.x, game.player.pos.z - start.z);
-    add('player.walks', moved > 1.2, moved.toFixed(2));
-
-    // carjacking
-    game.player.pos.x = game.world.spots.dockCar.x + 1.4;
-    game.player.pos.z = game.world.spots.dockCar.z;
-    game.tryEnterVehicle();
-    add('vehicle.enter', !!game.player.vehicle, game.player.vehicle ? game.player.vehicle.name : 'none');
-    input.held.add('KeyW');
-    for (let i = 0; i < 40; i++) game.update(1 / 60);
-    input.held.delete('KeyW');
-    const carSpeed = game.player.vehicle ? game.player.vehicle.forwardSpeed : 0;
-    add('vehicle.drives', carSpeed > 3, carSpeed.toFixed(2));
-    game.tryExitVehicle();
-    add('vehicle.exit', !game.player.vehicle, 'ok');
-
-    // shooting
-    const beforeAmmo = game.player.ammo;
-    game.player.fireTimer = 0;
-    game.player.fire(game);
-    add('weapon.fires', game.player.ammo === beforeAmmo - 1, `${beforeAmmo}->${game.player.ammo}`);
-    add('effects.tracer', game.effects.items.length > 0, game.effects.items.length);
-
-    // heat and police
-    game.addHeat(2.4, 'TEST');
-    add('heat.stars', game.stars >= 2, game.stars);
-    game.player.pos.x = 0;
-    game.player.pos.z = 0;
-    for (let i = 0; i < 90; i++) game.update(1 / 60);
-    add('police.respond', game.police.count >= 1, game.police.count);
-
-    // save round trip
-    game.save();
-    const save = game.readSave();
-    add('save.roundtrip', !!save && typeof save.money === 'number', save ? save.money : 'none');
-
-    // the whole three-job story, start to payout
-    for (const check of missionFlow(game)) checks.push(check);
-
-    // render
-    game.render();
-    const info = game.renderer.info.render;
-    add('render.triangles', info.triangles > 5000, info.triangles);
-    add('render.calls', info.calls > 5, info.calls);
-    add('no.errors', errors.length === 0, errors.join(' | '));
-  } catch (err) {
-    add('exception', false, err && err.stack ? err.stack.split('\n').slice(0,4).join(' << ') : String(err));
-  }
-
-  const failed = checks.filter((c) => !c.ok);
-  const out = { ok: failed.length === 0, failed: failed.length, checks };
-  const pre = document.createElement('pre');
-  pre.id = 'testout';
-  pre.textContent = `__TEST__${JSON.stringify(out)}__END__`;
-  pre.style.display = 'none';
-  document.body.appendChild(pre);
-  document.title = out.ok ? 'TEST OK' : `TEST FAIL ${failed.length}`;
-  return out;
-}
-
-if (testMode) {
-  window.setTimeout(() => {
-    try {
-      runSelfTest();
-    } catch (err) {
-      const pre = document.createElement('pre');
-      pre.id = 'testout';
-      pre.textContent = `__TEST__${JSON.stringify({ ok: false, failed: 1, checks: [{ name: 'harness', ok: false, detail: String(err) }] })}__END__`;
-      document.body.appendChild(pre);
-      document.title = 'TEST FAIL';
-    }
-  }, 350);
-}
-
-// tiny hook the screenshot rig can poll
-window.__viceFrames = () => frames;

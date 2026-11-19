@@ -1,61 +1,108 @@
-// Every tuning number and colour in one place. The playfield is a fixed 1280x720 logical area;
-// the renderer scales it to the window, so no rule below depends on the screen size.
+// Vice Harbor - central tuning table.
+// Every gameplay number and every story beat lives here, so the rest of the
+// game reads like a description of the world instead of a pile of magic numbers.
 
-export const FIELD = { width: 1280, height: 720, groundY: 664 };
-
-/** The simulation's fixed step, in seconds: 60 updates a second whatever the display's rate. */
-export const STEP = 1 / 60;
-
-export const PLAYER = {
-  width: 72,
-  height: 24,
-  speed: 560,
-  invulnerable: 1.5,
+export const CFG = {
+  city: {
+    half: 140,        // street grid spans -half .. +half on both axes
+    block: 44,        // center-line distance between adjacent roads
+    roadW: 13,        // asphalt width
+    walkW: 3.5,       // pavement strip on each side
+    seaZ: 96,         // harbour water begins past this +Z line
+    maxBuildingH: 46,
+    minBuildingH: 9,
+  },
+  player: {
+    walk: 12,
+    run: 20,
+    radius: 1.3,
+    maxHealth: 100,
+    fireCooldown: 0.14,
+    bulletSpeed: 150,
+    bulletLife: 1.1,
+  },
+  car: {
+    accel: 30,
+    brake: 42,
+    reverse: 18,
+    topSpeed: 52,
+    turnRate: 2.1,
+    drag: 1.7,
+    radius: 2.4,
+  },
+  wanted: {
+    stars: 5,
+    coolDown: 16,     // seconds of clean driving to shed one star
+    policePerStar: 1,
+    carjackStars: 2,
+    shootStars: 1,
+  },
+  camera: {
+    dist: 19,
+    height: 10,
+    fov: 62,
+    follow: 4.5,
+    lookAhead: 6,
+  },
+  world: {
+    trafficCars: 18,
+    pedestrians: 26,
+    fogNear: 55,
+    fogFar: 330,
+  },
 };
 
-export const LIVES = 3;
-
-export const BLOCK = {
-  minWidth: 40,
-  maxWidth: 110,
-  height: 36,
-  speed: 240,
-  speedPerLevel: 30,
-  speedJitter: 90,
-  interval: 0.55,
-  intervalScale: 0.88,
-  minInterval: 0.14,
-  dodgePoints: 1,
+// Dusk palette: violet upper sky, burnt-orange horizon, teal water, neon signs.
+export const PAL = {
+  skyTop: 0x241a4a,
+  skyBottom: 0xff7a45,
+  fog: 0x9a6a72,
+  sun: 0xffb27a,
+  ambient: 0x6a5a86,
+  water: 0x16304f,
+  waterHi: 0x4f8fb5,
+  asphalt: 0x24242c,
+  lane: 0xf2c14e,
+  pavement: 0x4a4652,
+  neonPink: 0xff2d95,
+  neonCyan: 0x2ee6f2,
+  neonGold: 0xffd23f,
+  police: 0xf2f2f2,
+  policeDark: 0x141824,
+  building: [0x3b3550, 0x5a3b46, 0x2f4a52, 0x4a4055, 0x6b4a3e, 0x33304a],
 };
 
-export const COIN = {
-  size: 24,
-  speed: 190,
-  speedPerLevel: 14,
-  interval: 1.4,
-  intervalJitter: 0.8,
-  points: 10,
-};
+// Three escalating jobs. Coordinates sit on real road intersections, so each
+// marker is reachable by car and every mission changes the play state.
+export const MISSIONS = [
+  {
+    id: 'harbor-run',
+    title: 'HARBOR RUN',
+    brief: 'Take the wheels down to the container yard on the south pier.',
+    target: { x: -88, z: 44 },
+    radius: 12,
+    reward: 500,
+    needCar: false,
+  },
+  {
+    id: 'hot-package',
+    title: 'HOT PACKAGE',
+    brief: 'Liberate a ride, then deliver it to the neon safehouse uptown.',
+    target: { x: 44, z: -88 },
+    radius: 12,
+    reward: 1000,
+    needCar: true,
+  },
+  {
+    id: 'clean-getaway',
+    title: 'CLEAN GETAWAY',
+    brief: 'Spark a three-star chase and lose the heat at the lighthouse.',
+    target: { x: 88, z: 88 },
+    radius: 14,
+    reward: 1800,
+    needCar: true,
+    needStars: 3,
+  },
+];
 
-/** Seconds of play per level, and the last level: speeds and spawn rates stop growing there. */
-export const LEVEL = { seconds: 12, max: 12 };
-
-/** How many falling things can exist at once; the pool is allocated once, at boot. */
-export const POOL_SIZE = 64;
-
-export const PALETTE = {
-  backdrop: '#11141b',
-  sky: '#1b1f2a',
-  ground: '#2a3040',
-  player: '#4fc3f7',
-  block: '#e5534b',
-  coin: '#f2c94c',
-  panel: '#252b38',
-  text: '#eef1f5',
-  muted: '#8b93a3',
-};
-
-export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
-
-/** Where the best score is kept between visits (this browser only). */
-export const BEST_KEY = 'block-dodger.best';
+export const SAVE_KEY = 'vice-harbor-save-v1';
