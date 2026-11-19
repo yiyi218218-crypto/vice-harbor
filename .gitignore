@@ -1,0 +1,6 @@
+# Local build / test artifacts (never part of the entry)
+out/
+.chrome-*/
+.checktmp/
+node_modules/
+*.log

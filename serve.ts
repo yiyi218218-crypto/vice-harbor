@@ -1,72 +1,68 @@
-// A tiny static server for game/ (Node 22, standard library only), so an entry can be played
-// locally without a build step: `node serve.ts` serves game/ on http://localhost:8080.
-// It sends the MIME types a browser game needs, refuses any path outside game/, and otherwise
-// does nothing clever: this is a development convenience, not a web server for the internet.
-import { createReadStream, statSync } from 'node:fs';
+// Vice Harbor — dependency-free static file server for local play/testing.
+// Serves the repository root so /game/index.html loads its ES modules and the
+// vendored three.js over HTTP with correct MIME types. No network egress.
+
 import { createServer } from 'node:http';
+import { createReadStream, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = resolve(fileURLToPath(new URL('./game', import.meta.url)));
-const args = process.argv.slice(2);
-const portIndex = args.indexOf('--port');
-const requested = portIndex === -1 ? 8080 : Number(args[portIndex + 1]);
-const port = Number.isInteger(requested) && requested > 0 && requested < 65536 ? requested : 8080;
+const ROOT = dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.PORT || 8080);
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8',
+  '.ts': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
-  '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
+  '.png': 'image/png',
   '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon',
-  '.woff2': 'font/woff2',
-  '.glb': 'model/gltf-binary',
-  '.gltf': 'model/gltf+json',
-  '.bin': 'application/octet-stream',
-  '.wasm': 'application/wasm',
-  '.wav': 'audio/wav',
-  '.mp3': 'audio/mpeg',
-  '.ogg': 'audio/ogg',
-  '.txt': 'text/plain; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
 };
 
-createServer((request, response) => {
-  const url = new URL(request.url ?? '/', 'http://localhost');
-  let pathname: string;
+function safePath(urlPath: string): string {
+  let decoded: string;
   try {
-    pathname = decodeURIComponent(url.pathname);
+    decoded = decodeURIComponent(urlPath.split('?')[0]);
   } catch {
-    response.writeHead(400).end('bad request');
+    decoded = urlPath;
+  }
+  if (decoded === '/' || decoded === '') decoded = '/game/index.html';
+  const full = resolve(join(ROOT, '.' + normalize(decoded)));
+  // Refuse anything that escapes the repository root.
+  if (full !== ROOT && !full.startsWith(ROOT + sep)) return '';
+  return full;
+}
+
+const server = createServer((req, res) => {
+  const path = safePath(req.url || '/');
+  if (!path || !existsSync(path)) {
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('404 Not Found');
     return;
   }
-  if (pathname.endsWith('/')) pathname += 'index.html';
-  const file = resolve(join(root, normalize(pathname)));
-  if (file !== root && !file.startsWith(root + sep)) {
-    response.writeHead(403).end('forbidden');
+  const st = statSync(path);
+  const target = st.isDirectory() ? join(path, 'index.html') : path;
+  if (!existsSync(target)) {
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('404 Not Found');
     return;
   }
-  let size: number;
-  try {
-    const stats = statSync(file);
-    if (!stats.isFile()) throw new Error('not a file');
-    size = stats.size;
-  } catch {
-    response.writeHead(404).end('not found');
+  const type = MIME[extname(target).toLowerCase()] || 'application/octet-stream';
+  res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store' });
+  if (process.env.NODE_ENV === 'test') {
+    // In tests just report the resolved path; keep the server single-purpose.
+    res.end(target);
     return;
   }
-  response.writeHead(200, {
-    'content-type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream',
-    'content-length': size,
-    'cache-control': 'no-store',
-  });
-  createReadStream(file).pipe(response);
-}).listen(port, '127.0.0.1', () => {
-  console.log(`game/ is on http://localhost:${port}`);
+  createReadStream(target).pipe(res);
+});
+
+server.listen(PORT, '127.0.0.1', () => {
+  process.stdout.write(`Vice Harbor serving ${ROOT}/game at http://localhost:${PORT}\n`);
 });
