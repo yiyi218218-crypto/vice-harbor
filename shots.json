@@ -1,5 +1,88 @@
-[
-  { "name": "1-start.jpg", "query": "?shot=start&seed=1" },
-  { "name": "2-play.jpg", "query": "?shot=play&seed=1" },
-  { "name": "3-end.jpg", "query": "?shot=end&seed=1" }
-]
+{
+  "schema": "vice-harbor/shots/1",
+  "seed": 1,
+  "game": "game/index.html",
+  "note": "Every still is a live frame of the game, posed by the shot parameter and reproducible with the same seed.",
+  "poses": [
+    {
+      "file": "screenshots/1-start.jpg",
+      "shot": "start",
+      "seed": 1,
+      "url": "game/index.html?shot=start&seed=1",
+      "caption": "Title card over the harbor at dusk, the skyline and the freighter behind it.",
+      "camera": {
+        "position": [
+          280,
+          24,
+          130
+        ],
+        "lookAt": [
+          0,
+          22,
+          -10
+        ],
+        "fov": 60
+      }
+    },
+    {
+      "file": "screenshots/2-play.jpg",
+      "shot": "play",
+      "seed": 1,
+      "url": "game/index.html?shot=play&seed=1",
+      "caption": "Behind the wheel of a Marlin GT on the avenue, traffic ahead and pedestrians on the walk.",
+      "camera": {
+        "position": [
+          -46,
+          2.4,
+          88
+        ],
+        "lookAt": [
+          -38,
+          1.35,
+          99
+        ],
+        "fov": 54
+      }
+    },
+    {
+      "file": "screenshots/3-heat.jpg",
+      "shot": "heat",
+      "seed": 1,
+      "url": "game/index.html?shot=heat&seed=1",
+      "caption": "Four stars, three patrol cars and their light bars closing in near the east pier.",
+      "camera": {
+        "position": [
+          38,
+          5.6,
+          -13
+        ],
+        "lookAt": [
+          38,
+          1.25,
+          22
+        ],
+        "fov": 60
+      }
+    },
+    {
+      "file": "screenshots/4-end.jpg",
+      "shot": "end",
+      "seed": 1,
+      "url": "game/index.html?shot=end&seed=1",
+      "caption": "The closing card: three jobs paid, the harbor quiet, the sun still on the water.",
+      "camera": {
+        "position": [
+          296,
+          32,
+          104
+        ],
+        "lookAt": [
+          -8,
+          20,
+          -26
+        ],
+        "fov": 54
+      }
+    }
+  ]
+}
