@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vice Harbor</title>
+<style>
+  :root {
+    --sun: #ffb457;
+    --hot: #ff5f7e;
+    --cyan: #4fe3d6;
+    --ink: #0a0d18;
+    --panel: rgba(10, 14, 26, 0.56);
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #07080f; }
+  body {
+    font-family: "Bahnschrift", "DIN Alternate", "Segoe UI", system-ui, sans-serif;
+    color: #f4ecdf;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+    cursor: default;
+  }
+  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #ui { position: fixed; inset: 0; pointer-events: none; }
+  .hide { opacity: 0 !important; visibility: hidden; }
+
+  /* ---------- HUD ---------- */
+  #hud { position: absolute; inset: 0; transition: opacity .35s; }
+  #wanted {
+    position: absolute; left: 34px; top: 26px; display: flex; gap: 5px;
+  }
+  #wanted i {
+    width: 22px; height: 22px; display: block;
+    background: rgba(255, 255, 255, 0.22);
+    clip-path: polygon(50% 0, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
+    transition: background .18s, filter .18s;
+  }
+  #wanted i.on { background: var(--sun); filter: drop-shadow(0 0 6px rgba(255, 170, 70, .95)); }
+  #wanted.pulse i.on { background: #fff2d0; }
+
+  #money {
+    position: absolute; left: 36px; top: 58px;
+    font-size: 30px; font-weight: 600; letter-spacing: .02em;
+    color: #d9f6c9; text-shadow: 0 2px 10px rgba(0, 0, 0, .8);
+    font-variant-numeric: tabular-nums;
+  }
+  #money small { font-size: 15px; opacity: .7; letter-spacing: .12em; margin-left: 6px; }
+
+  #objective {
+    position: absolute; right: 32px; top: 26px; max-width: 330px; text-align: right;
+    padding: 12px 16px 13px; border-right: 3px solid var(--sun);
+    background: linear-gradient(90deg, rgba(10,14,26,0) 0%, rgba(10,14,26,.62) 42%);
+  }
+  #objTitle {
+    font-size: 12px; letter-spacing: .26em; text-transform: uppercase; color: var(--sun);
+    margin-bottom: 5px; font-weight: 600;
+  }
+  #objText { font-size: 16px; line-height: 1.35; color: #f2eadb; }
+  #objDist { font-size: 13px; opacity: .62; margin-top: 6px; letter-spacing: .06em; font-variant-numeric: tabular-nums; }
+
+  #mapwrap {
+    position: absolute; left: 26px; bottom: 26px; width: 196px; height: 196px;
+    border-radius: 50%; overflow: hidden;
+    border: 2px solid rgba(255, 214, 160, .34);
+    box-shadow: 0 0 0 6px rgba(6, 9, 18, .5), 0 12px 34px rgba(0, 0, 0, .55);
+    background: #0b0f1a;
+  }
+  #map { width: 100%; height: 100%; display: block; }
+  #district {
+    position: absolute; left: 26px; top: -24px; font-size: 11px; letter-spacing: .22em;
+    text-transform: uppercase; color: rgba(255, 236, 208, .72);
+  }
+
+  #vitals { position: absolute; right: 32px; bottom: 30px; width: 218px; text-align: right; }
+  .bar { height: 9px; margin-bottom: 7px; background: rgba(8, 11, 20, .62); border-radius: 2px; overflow: hidden; }
+  .bar > b { display: block; height: 100%; width: 100%; transition: width .16s; }
+  #hpBar { background: linear-gradient(90deg, #58d68d, #b7f07a); }
+  #apBar { background: linear-gradient(90deg, #4aa8ff, #8fd4ff); }
+  #apWrap { opacity: .95; }
+  #weapon { font-size: 14px; letter-spacing: .14em; text-transform: uppercase; margin-top: 8px; color: #ffdca8; }
+  #ammo { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+  #ammo small { font-size: 14px; opacity: .55; }
+
+  #speedo {
+    position: absolute; right: 34px; bottom: 122px; text-align: right;
+    font-size: 40px; font-weight: 600; font-variant-numeric: tabular-nums;
+    color: #fff3dd; text-shadow: 0 3px 14px rgba(0, 0, 0, .8); opacity: 0; transition: opacity .25s;
+  }
+  #speedo small { font-size: 13px; letter-spacing: .2em; opacity: .6; display: block; margin-top: -6px; }
+  #speedo.on { opacity: 1; }
+
+  #subtitle {
+    position: absolute; left: 50%; bottom: 92px; transform: translateX(-50%);
+    max-width: 720px; text-align: center; font-size: 19px; line-height: 1.4;
+    color: #fff6e7; text-shadow: 0 2px 12px #000, 0 0 24px rgba(0,0,0,.9);
+    opacity: 0; transition: opacity .3s;
+  }
+  #subtitle.on { opacity: 1; }
+  #subtitle b { color: var(--sun); font-weight: 600; letter-spacing: .04em; }
+
+  #toast {
+    position: absolute; left: 50%; top: 88px; transform: translateX(-50%);
+    font-size: 15px; letter-spacing: .18em; text-transform: uppercase;
+    color: #ffe9c4; text-shadow: 0 2px 10px #000; opacity: 0; transition: opacity .3s;
+  }
+  #toast.on { opacity: 1; }
+
+  #banner {
+    position: absolute; inset: 0; display: grid; place-content: start center; text-align: center;
+    padding-top: 21vh; opacity: 0; transition: opacity .4s;
+  }
+  #banner.on { opacity: 1; }
+  #bannerTitle {
+    font-size: 62px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase;
+    color: #fff1d6; text-shadow: 0 0 34px rgba(255, 150, 60, .85), 0 6px 30px #000;
+  }
+  #bannerSub { font-size: 17px; letter-spacing: .34em; text-transform: uppercase; color: #ffd08a; margin-top: 10px; text-shadow: 0 2px 12px #000, 0 0 22px rgba(0,0,0,.9); }
+
+  #crosshair {
+    position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+    opacity: 0; transition: opacity .18s;
+  }
+  #crosshair.on { opacity: .95; }
+  #crosshair::before, #crosshair::after {
+    content: ""; position: absolute; background: #fff2da; box-shadow: 0 0 6px rgba(0,0,0,.9);
+  }
+  #crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
+  #crosshair::after { top: 10px; left: 0; height: 2px; width: 22px; }
+  #hitmark {
+    position: absolute; left: 50%; top: 50%; width: 30px; height: 30px; margin: -15px 0 0 -15px;
+    opacity: 0; transition: opacity .12s;
+  }
+  #hitmark.on { opacity: 1; }
+  #hitmark::before, #hitmark::after {
+    content: ""; position: absolute; left: 14px; top: 0; width: 2px; height: 30px;
+    background: #ff8f6b; transform: rotate(45deg); box-shadow: 0 0 8px #ff6a3c;
+  }
+  #hitmark::after { transform: rotate(-45deg); }
+
+  #damage {
+    position: absolute; inset: 0; opacity: 0; transition: opacity .28s;
+    background: radial-gradient(ellipse at center, rgba(255,0,40,0) 52%, rgba(200,18,44,.62) 100%);
+  }
+
+  /* ---------- title ---------- */
+  #title { position: absolute; inset: 0; display: grid; grid-template-columns: 1fr; transition: opacity .5s; }
+  #title::before {
+    content: ""; position: absolute; inset: 0;
+    background:
+      linear-gradient(90deg, rgba(6, 8, 16, .88) 0%, rgba(6, 8, 16, .58) 34%, rgba(6, 8, 16, .06) 66%, transparent 100%),
+      linear-gradient(0deg, rgba(6, 8, 16, .72) 0%, transparent 30%);
+  }
+  #title .left {
+    position: absolute; left: 92px; top: 50%; transform: translateY(-50%);
+  }
+  #logo {
+    font-size: 104px; line-height: .84; font-weight: 700; letter-spacing: .04em;
+    text-transform: uppercase;
+    background: linear-gradient(179deg, #fff4d8 8%, #ffc46b 38%, #ff7a5c 66%, #c94b8b 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 6px 26px rgba(255, 120, 60, .5));
+  }
+  #logo em { display: block; font-style: normal; letter-spacing: .3em; }
+  #rule { width: 268px; height: 2px; margin: 22px 0 16px; background: linear-gradient(90deg, var(--sun), rgba(255,90,120,.1)); }
+  #tagline { font-size: 17px; letter-spacing: .34em; text-transform: uppercase; color: #cbd9e6; opacity: .88; }
+  #startHint {
+    margin-top: 40px; font-size: 15px; letter-spacing: .3em; text-transform: uppercase;
+    color: #fff2d8; animation: breathe 2.4s ease-in-out infinite;
+  }
+  @keyframes breathe { 0%,100% { opacity: .45 } 50% { opacity: 1 } }
+  #keys {
+    position: absolute; right: 80px; bottom: 58px; font-size: 13px; line-height: 2.05;
+    letter-spacing: .1em; color: rgba(240, 232, 216, .78); text-align: right;
+  }
+  #keys b { color: var(--sun); font-weight: 600; letter-spacing: .14em; }
+  #best { position: absolute; left: 94px; bottom: 58px; font-size: 13px; letter-spacing: .2em; color: rgba(240,232,216,.6); }
+  #version { position: absolute; right: 80px; top: 34px; font-size: 11px; letter-spacing: .28em; color: rgba(240,232,216,.42); }
+
+  /* ---------- pause ---------- */
+  #pause {
+    position: absolute; inset: 0; display: grid; place-content: center; text-align: center;
+    background: rgba(6, 9, 16, .62); backdrop-filter: blur(3px); transition: opacity .25s;
+  }
+  #pause h2 { font-size: 44px; letter-spacing: .24em; margin: 0 0 18px; font-weight: 600; }
+  #pause p { font-size: 13px; letter-spacing: .22em; color: #c9d4e2; margin: 6px 0; }
+
+  /* ---------- fade ---------- */
+  #fade { position: absolute; inset: 0; background: #05070d; opacity: 0; transition: opacity .5s; }
+</style>
+</head>
+<body>
+<canvas id="game" aria-label="Vice Harbor: an open-world sunset crime game"></canvas>
+<div id="ui">
+  <div id="hud" class="hide">
+    <div id="wanted"><i></i><i></i><i></i><i></i><i></i></div>
+    <div id="money">$0</div>
+    <div id="objective">
+      <div id="objTitle">Mission</div>
+      <div id="objText">Free roam</div>
+      <div id="objDist"></div>
+    </div>
+    <div id="mapwrap"><div id="district">Vice Harbor</div><canvas id="map" width="392" height="392"></canvas></div>
+    <div id="vitals">
+      <div class="bar"><b id="hpBar"></b></div>
+      <div class="bar" id="apWrap"><b id="apBar"></b></div>
+      <div id="weapon">Unarmed</div>
+      <div id="ammo">—</div>
+    </div>
+    <div id="speedo">0<small>KM/H</small></div>
+    <div id="crosshair"></div>
+    <div id="hitmark"></div>
+    <div id="subtitle"></div>
+    <div id="toast"></div>
+    <div id="banner"><div id="bannerTitle">Mission passed</div><div id="bannerSub">$2,000</div></div>
+    <div id="damage"></div>
+  </div>
+  <div id="title">
+    <div class="left">
+      <div id="logo">Vice<em>Harbor</em></div>
+      <div id="rule"></div>
+      <div id="tagline">A sunset crime story</div>
+      <div id="startHint">Press enter to clock in</div>
+    </div>
+    <div id="version">Chapter one &middot; Port of Vice</div>
+    <div id="best">No shift yet</div>
+    <div id="keys">
+      <div><b>WASD</b> move &nbsp; <b>Shift</b> sprint &nbsp; <b>F</b> enter / exit car</div>
+      <div><b>Mouse</b> look &nbsp; <b>Click</b> fire &nbsp; <b>E</b> action &nbsp; <b>1 / 2</b> weapon</div>
+      <div><b>Space</b> handbrake / jump &nbsp; <b>P</b> pause &nbsp; <b>M</b> mute</div>
+    </div>
+  </div>
+  <div id="pause" class="hide"><h2>Paused</h2><p>P to resume &middot; Esc to quit to title</p></div>
+  <div id="fade"></div>
+</div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
