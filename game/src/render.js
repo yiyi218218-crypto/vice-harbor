@@ -1,104 +1,141 @@
-// Rendering layer: WebGL renderer setup, a third-person follow camera with
-// separate walking/driving framing, small ambient animations, and a hook for
-// the deterministic photo-mode camera.
+// Drawing only: the world's state and the current screen in, pixels out. The 1280x720 playfield
+// is scaled to fit the window and centred, the margin filled with the backdrop colour. Flat
+// rectangles and circles, canvas text for the HUD and the panels. Text that holds a number is
+// rebuilt only when the number changes, so a frame allocates nothing.
+import { FIELD, FONT, LIVES, PALETTE } from './config.js';
+import { KIND_COIN } from './world.js';
 
-import * as THREE from 'three';
-import { CFG } from './config.js';
-import { angleDelta, clamp } from './random.js';
+export const SCREEN_TITLE = 'title';
+export const SCREEN_PLAY = 'play';
+export const SCREEN_PAUSED = 'paused';
+export const SCREEN_OVER = 'over';
+
+/** The panel's width; its height grows with its lines: room for the title, the lines and the prompt. */
+const PANEL = { width: 600, top: 134, line: 34, bottom: 70 };
+const LIFE_SIZE = 20;
+const LIFE_GAP = 8;
+
+function cachedLabel(prefix) {
+  let value = -1;
+  let text = '';
+  return function label(next) {
+    if (next !== value) {
+      value = next;
+      text = prefix + next;
+    }
+    return text;
+  };
+}
 
 export function createRenderer(canvas) {
-  const renderer = new THREE.WebGLRenderer({
-    canvas,
-    antialias: true,
-    powerPreference: 'high-performance',
-  });
-  renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 1.6));
-  renderer.setSize(globalThis.innerWidth, globalThis.innerHeight, false);
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.34;
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  return renderer;
-}
+  const context = canvas.getContext('2d');
+  const view = { scale: 1, x: 0, y: 0 };
+  const scoreLabel = cachedLabel('Score ');
+  const levelLabel = cachedLabel('Level ');
+  const finalLabel = cachedLabel('Score ');
+  const bestLabel = cachedLabel('Best ');
 
-export function createCamera() {
-  const camera = new THREE.PerspectiveCamera(62, globalThis.innerWidth / globalThis.innerHeight, 0.1, 900);
-  camera.position.set(0, CFG.camHeight, CFG.camDistance);
-  return camera;
-}
-
-// The camera rig owns a smoothed focus point and heading so it never snaps.
-export class CameraRig {
-  constructor(camera) {
-    this.camera = camera;
-    this.focus = new THREE.Vector3(0, 1.2, 0);
-    this.heading = 0;
-    this.mode = 'foot';
-    this.shot = null;
+  function resize() {
+    const ratio = window.devicePixelRatio || 1;
+    const width = Math.round(window.innerWidth * ratio);
+    const height = Math.round(window.innerHeight * ratio);
+    canvas.width = width;
+    canvas.height = height;
+    view.scale = Math.min(width / FIELD.width, height / FIELD.height);
+    view.x = (width - FIELD.width * view.scale) / 2;
+    view.y = (height - FIELD.height * view.scale) / 2;
   }
 
-  useShot(pose) {
-    this.shot = pose;
-    const c = pose.camera;
-    this.camera.position.set(c.x, c.y, c.z);
-    this.camera.lookAt(c.look.x, c.look.y, c.look.z);
+  const fonts = new Map();
+  function text(value, x, y, size, color, align) {
+    if (!fonts.has(size)) fonts.set(size, `${size}px ${FONT}`);
+    context.font = fonts.get(size);
+    context.fillStyle = color;
+    context.textAlign = align;
+    context.fillText(value, x, y);
   }
 
-  clearShot() {
-    this.shot = null;
-  }
+  function drawField(state) {
+    context.fillStyle = PALETTE.sky;
+    context.fillRect(0, 0, FIELD.width, FIELD.height);
+    context.fillStyle = PALETTE.ground;
+    context.fillRect(0, FIELD.groundY, FIELD.width, FIELD.height - FIELD.groundY);
 
-  update(target, dt, inCar = false) {
-    if (this.shot) return; // frozen for screenshots
-    this.mode = inCar ? 'car' : 'foot';
-    const dist = inCar ? CFG.camDistance * 1.25 : CFG.camDistance;
-    const height = inCar ? CFG.camHeight * 0.8 : CFG.camHeight;
-
-    // Desired focus is slightly ahead of the player in their facing direction.
-    const ahead = inCar ? CFG.camLookAhead * 1.6 : CFG.camLookAhead;
-    const desiredFocus = new THREE.Vector3(
-      target.x + Math.sin(target.heading) * ahead,
-      1.2,
-      target.z + Math.cos(target.heading) * ahead,
-    );
-    const k = 1 - Math.exp(-CFG.camLag * dt);
-    this.focus.lerp(desiredFocus, k);
-
-    // Camera trails behind the player, smoothly rotating toward their heading.
-    const desiredHeading = target.heading + Math.PI;
-    this.heading += angleDelta(desiredHeading, this.heading) * k;
-    const bx = this.focus.x + Math.sin(this.heading) * dist;
-    const bz = this.focus.z + Math.cos(this.heading) * dist;
-    const desired = new THREE.Vector3(bx, height, bz);
-    this.camera.position.lerp(desired, k);
-
-    // Keep the camera above the streets and below the skyline.
-    this.camera.position.y = clamp(this.camera.position.y, 2.2, 60);
-    this.camera.lookAt(this.focus.x, this.focus.y + (inCar ? 0.6 : 1.0), this.focus.z);
-  }
-}
-
-// Gentle life in the scene: bay shimmer and police light pulses.
-export function animateScene(scene, time, sea) {
-  if (sea && sea.material) {
-    sea.material.emissiveIntensity = 0.5 + Math.sin(time * 0.8) * 0.12;
-    sea.position.x = Math.sin(time * 0.15) * 1.2;
-  }
-  scene.traverse((obj) => {
-    if (obj.name === 'policeBar' && obj.material) {
-      obj.material.emissiveIntensity = 1.3 + Math.abs(Math.sin(time * 9)) * 1.7;
-      obj.material.color.setHex(Math.sin(time * 9) > 0 ? 0x3d6bff : 0xff3040);
+    const items = state.items;
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index];
+      if (!item.active) continue;
+      if (item.kind === KIND_COIN) {
+        context.fillStyle = PALETTE.coin;
+        context.beginPath();
+        context.arc(item.x + item.width / 2, item.y + item.height / 2, item.width / 2, 0, Math.PI * 2);
+        context.fill();
+      } else {
+        context.fillStyle = PALETTE.block;
+        context.fillRect(item.x, item.y, item.width, item.height);
+      }
     }
-  });
-}
 
-export function handleResize(renderer, camera) {
-  const onResize = () => {
-    camera.aspect = globalThis.innerWidth / globalThis.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(globalThis.innerWidth, globalThis.innerHeight, false);
-  };
-  globalThis.addEventListener('resize', onResize);
-  return onResize;
+    const player = state.player;
+    // Blink while invulnerable after a hit: hidden on every other tenth of a second.
+    if (player.invulnerable === 0 || Math.floor(player.invulnerable * 10) % 2 === 1) {
+      context.fillStyle = PALETTE.player;
+      context.fillRect(player.x, player.y, player.width, player.height);
+    }
+  }
+
+  function drawHud(state) {
+    context.textBaseline = 'top';
+    text(scoreLabel(state.score), 24, 20, 28, PALETTE.text, 'left');
+    text(levelLabel(state.level), FIELD.width / 2, 20, 28, PALETTE.text, 'center');
+    const firstLife = FIELD.width - 24 - LIVES * (LIFE_SIZE + LIFE_GAP) + LIFE_GAP;
+    text('Lives', firstLife - 12, 20, 28, PALETTE.text, 'right');
+    for (let life = 0; life < LIVES; life += 1) {
+      context.fillStyle = life < state.lives ? PALETTE.player : PALETTE.ground;
+      context.fillRect(firstLife + life * (LIFE_SIZE + LIFE_GAP), 24, LIFE_SIZE, LIFE_SIZE);
+    }
+  }
+
+  function drawPanel(title, lines, prompt) {
+    const height = PANEL.top + lines.length * PANEL.line + PANEL.bottom;
+    const x = (FIELD.width - PANEL.width) / 2;
+    const y = (FIELD.height - height) / 2;
+    context.fillStyle = PALETTE.panel;
+    context.fillRect(x, y, PANEL.width, height);
+    context.textBaseline = 'alphabetic';
+    text(title, FIELD.width / 2, y + 78, 48, PALETTE.text, 'center');
+    for (let index = 0; index < lines.length; index += 1) {
+      text(lines[index], FIELD.width / 2, y + PANEL.top + index * PANEL.line, 22, PALETTE.muted, 'center');
+    }
+    text(prompt, FIELD.width / 2, y + height - 40, 24, PALETTE.coin, 'center');
+  }
+
+  const TITLE_LINES = ['Dodge the red blocks. Catch the gold coins.', 'Move with ← → or A D.  Pause with P.', ''];
+  const PAUSED_LINES = ['The blocks will wait for you.'];
+  const OVER_LINES = ['', ''];
+
+  /** Paint one frame: the field, then the HUD or a panel for the screen the game is on. */
+  function draw(state, screen, best) {
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.fillStyle = PALETTE.backdrop;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
+    drawField(state);
+    if (screen === SCREEN_TITLE) {
+      TITLE_LINES[2] = bestLabel(best);
+      drawPanel('Block Dodger', TITLE_LINES, 'Press Space or click to start');
+      return;
+    }
+    drawHud(state);
+    if (screen === SCREEN_PAUSED) drawPanel('Paused', PAUSED_LINES, 'Press P to resume');
+    else if (screen === SCREEN_OVER) {
+      OVER_LINES[0] = finalLabel(state.score);
+      OVER_LINES[1] = bestLabel(best);
+      drawPanel('Game over', OVER_LINES, 'Press Space or click to play again');
+    }
+  }
+
+  resize();
+  window.addEventListener('resize', resize);
+  return { draw };
 }
